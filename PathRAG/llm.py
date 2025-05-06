@@ -4,8 +4,13 @@ import json
 import os
 import re
 import struct
+import sys
 from functools import lru_cache
 from typing import List, Dict, Callable, Any, Union, Optional
+
+# Add parent directory to Python path to make the module importable when run directly
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import aioboto3
 import aiohttp
 import numpy as np
@@ -28,14 +33,23 @@ from tenacity import (
 )
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-from .utils import (
-    wrap_embedding_func_with_attrs,
-    locate_json_string_body_from_string,
-    safe_unicode_decode,
-    logger,
-)
-
-import sys
+# Now we can use either relative or absolute imports
+try:
+    # Try relative import first (when used as a package)
+    from .utils import (
+        wrap_embedding_func_with_attrs,
+        locate_json_string_body_from_string,
+        safe_unicode_decode,
+        logger,
+    )
+except ImportError:
+    # Fall back to absolute import (when run as a script)
+    from PathRAG.utils import (
+        wrap_embedding_func_with_attrs,
+        locate_json_string_body_from_string,
+        safe_unicode_decode,
+        logger,
+    )
 
 if sys.version_info < (3, 9):
     from typing import AsyncIterator
@@ -188,13 +202,10 @@ async def bedrock_complete_if_cache(
 
     messages.append({"role": "user", "content": [{"text": prompt}]})
 
-
     args = {"modelId": model, "messages": messages}
-
 
     if system_prompt:
         args["system"] = [{"text": system_prompt}]
-
 
     inference_params_map = {
         "max_tokens": "maxTokens",
@@ -209,7 +220,6 @@ async def bedrock_complete_if_cache(
             args["inferenceConfig"][inference_params_map.get(param, param)] = (
                 kwargs.pop(param)
             )
-
 
     session = aioboto3.Session()
     async with session.client("bedrock-runtime") as bedrock_async_client:
@@ -536,11 +546,16 @@ async def azure_openai_complete(
     prompt, system_prompt=None, history_messages=[], keyword_extraction=False, **kwargs
 ) -> str:
     keyword_extraction = kwargs.pop("keyword_extraction", None)
+    
+    # Ensure we're using the API version from environment
+    api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
+    
     result = await azure_openai_complete_if_cache(
-        "conversation-4o-mini",
+        os.getenv("AZURE_OPENAI_MODEL_NAME"),
         prompt,
         system_prompt=system_prompt,
         history_messages=history_messages,
+        api_version=api_version,  # Explicitly pass the API version
         **kwargs,
     )
     if keyword_extraction:  # TODO: use JSON API
@@ -626,17 +641,14 @@ async def zhipu_complete_if_cache(
     if not system_prompt:
         system_prompt = "You are a helpful assistant. 注意内容里的敏感词用***替换。"
 
-
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.extend(history_messages)
     messages.append({"role": "user", "content": prompt})
 
-
     logger.debug("===== Query Input to LLM =====")
     logger.debug(f"Query: {prompt}")
     logger.debug(f"System prompt: {system_prompt}")
-
 
     kwargs = {
         k: v for k, v in kwargs.items() if k not in ["hashing_kv", "keyword_extraction"]
@@ -667,7 +679,6 @@ async def zhipu_complete(
 
         Only return the JSON, no other text."""
 
-
         if system_prompt:
             system_prompt = f"{system_prompt}\n\n{extraction_prompt}"
         else:
@@ -680,7 +691,6 @@ async def zhipu_complete(
                 history_messages=history_messages,
                 **kwargs,
             )
-
 
             try:
                 data = json.loads(response)
@@ -700,7 +710,6 @@ async def zhipu_complete(
                         )
                     except json.JSONDecodeError:
                         pass
-
 
                 logger.warning(
                     f"Failed to parse keyword extraction response: {response}"
@@ -913,7 +922,6 @@ async def siliconcloud_embedding(
     return np.array(embeddings)
 
 
-
 async def bedrock_embedding(
     texts: list[str],
     model: str = "amazon.titan-embed-text-v2:0",
@@ -940,7 +948,6 @@ async def bedrock_embedding(
                     body = json.dumps(
                         {
                             "inputText": text,
-                            
                             "embeddingTypes": ["float"],
                         }
                     )
@@ -1098,7 +1105,7 @@ if __name__ == "__main__":
     import asyncio
 
     async def main():
-        result = await gpt_4o_mini_complete("How are you?")
+        result = await azure_openai_complete("How are you?")
         print(result)
 
     asyncio.run(main())

@@ -7,6 +7,9 @@ from typing import Any, Union, cast
 import networkx as nx
 import numpy as np
 from nano_vectordb import NanoVectorDB
+import json
+import requests
+from urllib.parse import urljoin
 
 from .utils import (
     logger,
@@ -339,3 +342,251 @@ class NetworkXStorage(BaseGraphStorage):
         return self._graph.edges()
     async def nodes(self):
         return self._graph.nodes()
+
+
+@dataclass
+class AzureSearchVectorStorage(BaseVectorStorage):
+    """
+    Vector storage implementation for Azure AI Search.
+    Requires:
+    - An Azure AI Search service
+    - The azure-search-documents package (pip install azure-search-documents)
+    """
+    cosine_better_than_threshold: float = 0.2
+
+    def __post_init__(self):
+        try:
+            from azure.search.documents import SearchClient
+            from azure.search.documents.models import Vector
+            from azure.core.credentials import AzureKeyCredential
+        except ImportError:
+            raise ImportError("Please install azure-search-documents package: pip install azure-search-documents")
+
+        # Get configuration from global_config or use defaults
+        self.endpoint = self.global_config.get("vector_db_storage_cls_kwargs", {}).get("endpoint")
+        self.key = self.global_config.get("vector_db_storage_cls_kwargs", {}).get("key")
+        self.index_name_prefix = self.global_config.get("vector_db_storage_cls_kwargs", {}).get("index_name_prefix", "pathrag")
+        
+        if not self.endpoint or not self.key:
+            raise ValueError("Azure Search endpoint and key must be provided in vector_db_storage_cls_kwargs")
+        
+        # Create index name based on namespace
+        self.index_name = f"{self.index_name_prefix}-{self.namespace}"
+        
+        # Initialize the Azure search client
+        self.credential = AzureKeyCredential(self.key)
+        self.search_client = SearchClient(
+            endpoint=self.endpoint,
+            index_name=self.index_name,
+            credential=self.credential
+        )
+        
+        # Create the index if it doesn't exist
+        self._ensure_index_exists()
+        
+        self.cosine_better_than_threshold = self.global_config.get(
+            "cosine_better_than_threshold", self.cosine_better_than_threshold
+        )
+        self._max_batch_size = self.global_config.get("embedding_batch_num", 32)
+    
+    def _ensure_index_exists(self):
+        """Ensure the search index exists, create it if it doesn't"""
+        try:
+            from azure.search.documents.indexes import SearchIndexClient
+            from azure.search.documents.indexes.models import (
+                SearchIndex,
+                SearchField,
+                SearchFieldDataType,
+                VectorSearch,
+                HnswVectorSearchAlgorithmConfiguration,
+                VectorSearchProfile,
+                VectorSearchAlgorithmKind,
+                VectorSearchAlgorithmMetric
+            )
+        except ImportError:
+            raise ImportError("Please install azure-search-documents package: pip install azure-search-documents")
+            
+        index_client = SearchIndexClient(
+            endpoint=self.endpoint,
+            credential=self.credential
+        )
+        
+        try:
+            # Check if index exists
+            index_client.get_index(self.index_name)
+            logger.info(f"Index {self.index_name} already exists")
+        except Exception:
+            # Create the index
+            logger.info(f"Creating index {self.index_name}")
+            
+            # Define vector search configuration
+            vector_search = VectorSearch(
+                algorithms=[
+                    HnswVectorSearchAlgorithmConfiguration(
+                        name="vector-config",
+                        kind=VectorSearchAlgorithmKind.HNSW,
+                        parameters={
+                            "m": 16,
+                            "efConstruction": 400,
+                            "efSearch": 500,
+                            "metric": VectorSearchAlgorithmMetric.COSINE
+                        }
+                    )
+                ],
+                profiles=[
+                    VectorSearchProfile(
+                        name="vector-profile",
+                        algorithm_configuration_name="vector-config",
+                    )
+                ]
+            )
+            
+            # Define fields for the index
+            fields = [
+                SearchField(name="id", type=SearchFieldDataType.String, key=True, filterable=True),
+                SearchField(name="content", type=SearchFieldDataType.String, searchable=True),
+                SearchField(name="vector", type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
+                          vector_search_dimensions=self.embedding_func.embedding_dim,
+                          vector_search_profile_name="vector-profile"),
+            ]
+            
+            # Add meta fields
+            for meta_field in self.meta_fields:
+                fields.append(SearchField(
+                    name=meta_field, 
+                    type=SearchFieldDataType.String, 
+                    filterable=True,
+                    searchable=True
+                ))
+                
+            # Create the index
+            index = SearchIndex(name=self.index_name, fields=fields, vector_search=vector_search)
+            index_client.create_or_update_index(index)
+            logger.info(f"Created index {self.index_name}")
+
+    async def upsert(self, data: dict[str, dict]):
+        logger.info(f"Inserting {len(data)} vectors to {self.namespace}")
+        if not len(data):
+            logger.warning("You insert an empty data to vector DB")
+            return []
+            
+        # Prepare documents for Azure Search
+        list_data = []
+        for k, v in data.items():
+            doc = {"id": k, "content": v.get("content", "")}
+            # Add metadata fields
+            for meta_field in self.meta_fields:
+                if meta_field in v:
+                    doc[meta_field] = v[meta_field]
+            list_data.append(doc)
+            
+        # Extract contents for embedding generation
+        contents = [v["content"] for v in data.values()]
+        batches = [
+            contents[i : i + self._max_batch_size]
+            for i in range(0, len(contents), self._max_batch_size)
+        ]
+
+        # Generate embeddings
+        async def wrapped_task(batch):
+            result = await self.embedding_func(batch)
+            pbar.update(1)
+            return result
+            
+        embedding_tasks = [wrapped_task(batch) for batch in batches]
+        pbar = tqdm_async(
+            total=len(embedding_tasks), desc="Generating embeddings", unit="batch"
+        )
+        embeddings_list = await asyncio.gather(*embedding_tasks)
+        embeddings = np.concatenate(embeddings_list)
+        
+        if len(embeddings) == len(list_data):
+            # Attach embeddings to documents
+            for i, doc in enumerate(list_data):
+                doc["vector"] = embeddings[i].tolist()
+                
+            # Upload documents in batches
+            from azure.search.documents.models import IndexDocumentsBatch
+            
+            batch_size = 1000  # Azure Search batch limit
+            results = []
+            
+            for i in range(0, len(list_data), batch_size):
+                batch = list_data[i:i+batch_size]
+                upload_result = self.search_client.upload_documents(documents=batch)
+                results.extend([r.succeeded for r in upload_result])
+                
+            logger.info(f"Uploaded {sum(results)} documents to Azure Search")
+            return results
+        else:
+            # Sometimes the embedding is not returned correctly, just log it
+            logger.error(
+                f"embedding is not 1-1 with data, {len(embeddings)} != {len(list_data)}"
+            )
+            return []
+
+    async def query(self, query: str, top_k=5):
+        # Generate embedding for query
+        embedding = await self.embedding_func([query])
+        embedding = embedding[0]
+        
+        # Perform vector search
+        results = self.search_client.search(
+            search_text=None,  # Vector search doesn't need text search
+            vector={"vector": embedding.tolist(), "fields": "vector", "k": top_k},
+            select=["id", "content"] + list(self.meta_fields),
+            top=top_k
+        )
+        
+        # Format results similar to the NanoVectorDB format
+        formatted_results = []
+        for doc in results:
+            result = {
+                "id": doc["id"], 
+                "content": doc.get("content", ""),
+                "distance": doc.get("@search.score", 0)
+            }
+            # Add metadata fields
+            for meta_field in self.meta_fields:
+                if meta_field in doc:
+                    result[meta_field] = doc[meta_field]
+            formatted_results.append(result)
+            
+        return formatted_results
+
+    async def delete_entity(self, entity_name: str):
+        try:
+            entity_id = compute_mdhash_id(entity_name, prefix="ent-")
+            try:
+                self.search_client.delete_documents(documents=[{"id": entity_id}])
+                logger.info(f"Entity {entity_name} has been deleted.")
+            except Exception:
+                logger.info(f"No entity found with name {entity_name}.")
+        except Exception as e:
+            logger.error(f"Error while deleting entity {entity_name}: {e}")
+
+    async def delete_relation(self, entity_name: str):
+        try:
+            # Need to find all relations that include this entity
+            # Since Azure Search doesn't support complex queries out of the box,
+            # we need to retrieve potential relations and filter
+            # This assumes src_id and tgt_id are in meta_fields
+            results = list(self.search_client.search(
+                search_text=entity_name,
+                filter=f"src_id eq '{entity_name}' or tgt_id eq '{entity_name}'", 
+                select=["id"]
+            ))
+            
+            if results:
+                # Delete the found documents
+                docs_to_delete = [{"id": doc["id"]} for doc in results]
+                self.search_client.delete_documents(documents=docs_to_delete)
+                logger.info(f"All relations related to entity {entity_name} have been deleted.")
+            else:
+                logger.info(f"No relations found for entity {entity_name}.")
+        except Exception as e:
+            logger.error(f"Error while deleting relations for entity {entity_name}: {e}")
+
+    async def index_done_callback(self):
+        # Azure Search indexes are persistent, so no need to save explicitly
+        pass

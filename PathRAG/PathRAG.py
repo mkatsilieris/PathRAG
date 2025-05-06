@@ -37,6 +37,7 @@ from .storage import (
     JsonKVStorage,
     NanoVectorDBStorage,
     NetworkXStorage,
+    AzureSearchVectorStorage,
 )
 
 
@@ -258,6 +259,7 @@ class PathRAG:
             "TiDBKVStorage": TiDBKVStorage,
 
             "NanoVectorDBStorage": NanoVectorDBStorage,
+            "AzureSearchVectorStorage": AzureSearchVectorStorage,
             "OracleVectorDBStorage": OracleVectorDBStorage,
             "MilvusVectorDBStorge": MilvusVectorDBStorge,
             "ChromaVectorDBStorage": ChromaVectorDBStorage,
