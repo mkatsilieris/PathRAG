@@ -27,3 +27,5 @@ PathRAG.log
 # Cache files
 content_repository/**
 working_repository/**
+
+*.xlsx

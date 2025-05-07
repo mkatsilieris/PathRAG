@@ -26,3 +26,10 @@ tiktoken
 torch
 transformers
 xxhash
+
+# Azure AI Search integration
+azure-search-documents>=11.4.0
+azure-identity>=1.12.0
+
+# Environment variables handling
+python-dotenv>=1.0.0

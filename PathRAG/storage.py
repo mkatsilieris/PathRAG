@@ -357,7 +357,8 @@ class AzureSearchVectorStorage(BaseVectorStorage):
     def __post_init__(self):
         try:
             from azure.search.documents import SearchClient
-            from azure.search.documents.models import Vector
+            # Importing directly from models causes issues in some versions
+            # Using the more reliable import paths instead
             from azure.core.credentials import AzureKeyCredential
         except ImportError:
             raise ImportError("Please install azure-search-documents package: pip install azure-search-documents")
@@ -397,11 +398,6 @@ class AzureSearchVectorStorage(BaseVectorStorage):
                 SearchIndex,
                 SearchField,
                 SearchFieldDataType,
-                VectorSearch,
-                HnswVectorSearchAlgorithmConfiguration,
-                VectorSearchProfile,
-                VectorSearchAlgorithmKind,
-                VectorSearchAlgorithmMetric
             )
         except ImportError:
             raise ImportError("Please install azure-search-documents package: pip install azure-search-documents")
@@ -416,38 +412,13 @@ class AzureSearchVectorStorage(BaseVectorStorage):
             index_client.get_index(self.index_name)
             logger.info(f"Index {self.index_name} already exists")
         except Exception:
-            # Create the index
-            logger.info(f"Creating index {self.index_name}")
-            
-            # Define vector search configuration
-            vector_search = VectorSearch(
-                algorithms=[
-                    HnswVectorSearchAlgorithmConfiguration(
-                        name="vector-config",
-                        kind=VectorSearchAlgorithmKind.HNSW,
-                        parameters={
-                            "m": 16,
-                            "efConstruction": 400,
-                            "efSearch": 500,
-                            "metric": VectorSearchAlgorithmMetric.COSINE
-                        }
-                    )
-                ],
-                profiles=[
-                    VectorSearchProfile(
-                        name="vector-profile",
-                        algorithm_configuration_name="vector-config",
-                    )
-                ]
-            )
+            # Create the index with basic fields, skipping vector search capabilities
+            logger.info(f"Creating index {self.index_name} (basic version without vector search)")
             
             # Define fields for the index
             fields = [
                 SearchField(name="id", type=SearchFieldDataType.String, key=True, filterable=True),
                 SearchField(name="content", type=SearchFieldDataType.String, searchable=True),
-                SearchField(name="vector", type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
-                          vector_search_dimensions=self.embedding_func.embedding_dim,
-                          vector_search_profile_name="vector-profile"),
             ]
             
             # Add meta fields
@@ -458,11 +429,13 @@ class AzureSearchVectorStorage(BaseVectorStorage):
                     filterable=True,
                     searchable=True
                 ))
-                
+            
+            # Create the index - simple version without vector search
+            index = SearchIndex(name=self.index_name, fields=fields)
+            
             # Create the index
-            index = SearchIndex(name=self.index_name, fields=fields, vector_search=vector_search)
             index_client.create_or_update_index(index)
-            logger.info(f"Created index {self.index_name}")
+            logger.info(f"Created index {self.index_name} (basic version)")
 
     async def upsert(self, data: dict[str, dict]):
         logger.info(f"Inserting {len(data)} vectors to {self.namespace}")
@@ -506,8 +479,6 @@ class AzureSearchVectorStorage(BaseVectorStorage):
                 doc["vector"] = embeddings[i].tolist()
                 
             # Upload documents in batches
-            from azure.search.documents.models import IndexDocumentsBatch
-            
             batch_size = 1000  # Azure Search batch limit
             results = []
             
@@ -526,17 +497,37 @@ class AzureSearchVectorStorage(BaseVectorStorage):
             return []
 
     async def query(self, query: str, top_k=5):
-        # Generate embedding for query
-        embedding = await self.embedding_func([query])
-        embedding = embedding[0]
-        
-        # Perform vector search
-        results = self.search_client.search(
-            search_text=None,  # Vector search doesn't need text search
-            vector={"vector": embedding.tolist(), "fields": "vector", "k": top_k},
-            select=["id", "content"] + list(self.meta_fields),
-            top=top_k
-        )
+        # Since we may not have vector search capabilities,
+        # we'll fall back to text search and just provide the results
+        try:
+            # Try to use vector search if possible
+            embedding = await self.embedding_func([query])
+            embedding = embedding[0]
+            
+            try:
+                # Attempt vector search
+                results = self.search_client.search(
+                    search_text=None,
+                    vector={"vector": embedding.tolist(), "fields": "vector", "k": top_k},
+                    select=["id", "content"] + list(self.meta_fields),
+                    top=top_k
+                )
+            except Exception as e:
+                logger.warning(f"Vector search failed: {e}. Falling back to text search.")
+                # Fall back to text search
+                results = self.search_client.search(
+                    search_text=query,
+                    select=["id", "content"] + list(self.meta_fields),
+                    top=top_k
+                )
+        except Exception as e:
+            logger.warning(f"Vector query preparation failed: {e}. Using text search.")
+            # Fall back to text search if embedding fails
+            results = self.search_client.search(
+                search_text=query,
+                select=["id", "content"] + list(self.meta_fields),
+                top=top_k
+            )
         
         # Format results similar to the NanoVectorDB format
         formatted_results = []

@@ -1,37 +1,157 @@
 import os
+import sys
+import time
+import datetime
+import traceback
+import glob
+import pandas as pd
+import argparse
+from pathlib import Path
+from dotenv import load_dotenv
 from PathRAG import PathRAG, QueryParam
 from PathRAG.llm import azure_openai_complete, azure_openai_embedding
+from PathRAG.utils import logger
 
+# Parse command line arguments
+parser = argparse.ArgumentParser(description='PathRAG test script')
+parser.add_argument('--generate-kb', action='store_true', 
+                    help='Generate knowledge base from content files')
+args = parser.parse_args()
 
+# Load environment variables from .env file
+load_dotenv()
+
+# Set up more verbose logging
+logger.setLevel("INFO")
+
+# Define paths
 WORKING_DIR = r"C:\Users\mkatsili\projects\PathRAG\working_repository"
+CONTENT_DIR = r"C:\Users\mkatsili\projects\PathRAG\content_repository"
+timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+EXCEL_OUTPUT = rf"C:\Users\mkatsili\projects\PathRAG\query_results_{timestamp}.xlsx"
 
+print(f"Script started at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
+# Create working directory if it doesn't exist
 if not os.path.exists(WORKING_DIR):
-    os.mkdir(WORKING_DIR)
+    os.makedirs(WORKING_DIR, exist_ok=True)
+    print(f"Created working directory: {WORKING_DIR}")
 
-# Configuration for using Azure AI Search
-# Uncomment and configure these lines to use Azure AI Search instead of local storage
-# azure_search_config = {
-#     "endpoint": "https://your-search-service-name.search.windows.net",
-#     "key": "your-azure-search-admin-key",
-#     "index_name_prefix": "pathrag"  # Each namespace (entities, relationships, etc.) will use this prefix
-# }
+try:
+    print("Initializing PathRAG with local storage configuration...")
+    
+    # Initialize PathRAG with local storage options
+    rag = PathRAG(
+        working_dir=WORKING_DIR,
+        llm_model_func=azure_openai_complete,
+        embedding_func=azure_openai_embedding,
+        vector_storage="NanoVectorDBStorage",
+        kv_storage="JsonKVStorage",
+        graph_storage="NetworkXStorage",
+    )
+    print("PathRAG initialized successfully!")
 
-rag = PathRAG(
-    working_dir=WORKING_DIR,
-    llm_model_func=azure_openai_complete,
-    embedding_func=azure_openai_embedding,  # Add embedding function to use Azure OpenAI
-    # Uncomment to use Azure AI Search for vector storage
-    # vector_storage="AzureSearchVectorStorage",  # This would need to be implemented
-    # vector_db_storage_cls_kwargs=azure_search_config,
-)
+    if args.generate_kb:
+        # Find all markdown files in the content directory
+        print(f"Searching for markdown files in {CONTENT_DIR}...")
+        all_md_files = []
+        for root, dirs, files in os.walk(CONTENT_DIR):
+            for file in files:
+                if file.endswith('.md'):
+                    all_md_files.append(os.path.join(root, file))
+        
+        print(f"Found {len(all_md_files)} markdown files to process")
+        
+        # Insert all files into the knowledge base
+        successful_files = 0
+        failed_files = 0
+        
+        print(f"\nProcessing files:")
+        print("-" * 50)
+        
+        for idx, file_path in enumerate(all_md_files):
+            file_name = os.path.basename(file_path)
+            print(f"Processing file {idx+1}/{len(all_md_files)}: {file_name}")
+            try:
+                with open(file_path, encoding='utf-8') as f:
+                    content = f.read()
+                    print(f"  - Inserting content ({len(content)} characters)...")
+                    start_time = time.time()
+                    rag.insert(content)
+                    end_time = time.time()
+                    print(f"  - File processed successfully in {end_time - start_time:.2f} seconds")
+                    successful_files += 1
+            except Exception as e:
+                print(f"  - ERROR processing file {file_path}: {str(e)}")
+                traceback.print_exc()
+                failed_files += 1
+                continue
+        
+        print("\nFile processing summary:")
+        print(f"- Successfully processed: {successful_files} files")
+        print(f"- Failed to process: {failed_files} files")
+        print(f"- Total files: {len(all_md_files)} files")
+    else:
+        print("\nSkipping knowledge base generation as requested...")
+        print("Using existing knowledge base in working directory:", WORKING_DIR)
+        print("Make sure the knowledge base files already exist in this directory.")
 
-data_file = r"C:\Users\mkatsili\projects\PathRAG\content_repository\J495_001_2023-ΚΑΤΑΧΩΡΗΣΗ ΑΙΤΗΜΑΤΟΣ ΚΑΤΑΝΑΛΩΤΙΚΟΥ ΔΑΝΕΙΟΥ ΜΕΣΩ ΚΑΤΑΣΤΗΜΑΤΟΣ_WF.md"
-question="Bηματα διαδικασιας Καταναλωτικού Δανείου"
-with open(data_file, encoding='utf-8') as f:
-    rag.insert(f.read())
-
-print(rag.query(question, param=QueryParam(mode="hybrid")))
+    # Test retrieval with timing
+    questions = [
+    "υπάρχει ηλικιακό όριο στην απόκτηση πιστωτικής κάρτας μεγιστο η ελαχιστο;",
+    "Με ποιους τρόπους μπορεί να κάνει αμφισβήτηση συναλλαγής κάρτας ένας πελάτης;"
+    ]
+    
+    # Create a list to hold our results for the Excel file
+    results_for_excel = []
+    
+    print("\nRunning queries:")
+    print("-" * 50)
+    
+    for i, question in enumerate(questions):
+        try:
+            print(f"\nQuery {i+1}/{len(questions)}: '{question}'")
+            start_time = time.time()
+            result = rag.query(question, param=QueryParam(mode="hybrid", use_cache=False))
+            end_time = time.time()
+            query_time = end_time - start_time
+            
+            print(f"Query completed in {query_time:.2f} seconds")
+            print(f"Response length: {len(str(result))} characters")
+            print("Response preview: " + str(result)[:100] + "..." if len(str(result)) > 100 else str(result))
+            
+            # Add result to our list for Excel export
+            results_for_excel.append({
+                "Question": question,
+                "Response": result,
+                "Time (seconds)": round(query_time, 2)
+            })
+        except Exception as e:
+            print(f"ERROR with query '{question}': {str(e)}")
+            traceback.print_exc()
+            results_for_excel.append({
+                "Question": question,
+                "Response": f"ERROR: {str(e)}",
+                "Time (seconds)": 0
+            })
+    
+    # Create a DataFrame and write to Excel
+    if results_for_excel:
+        try:
+            print(f"\nSaving results to Excel file: {EXCEL_OUTPUT}")
+            df = pd.DataFrame(results_for_excel)
+            df.to_excel(EXCEL_OUTPUT, index=False)
+            print(f"Results saved successfully to {EXCEL_OUTPUT}")
+        except Exception as e:
+            print(f"ERROR saving Excel file: {str(e)}")
+            traceback.print_exc()
+    
+    print(f"\nScript completed at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+except Exception as e:
+    print(f"\nCRITICAL ERROR: An exception occurred during execution: {str(e)}")
+    traceback.print_exc()
+    sys.exit(1)
 
 
 
