@@ -27,10 +27,11 @@ logger.setLevel("INFO")
 # Define paths
 WORKING_DIR = r"C:\Users\mkatsili\projects\PathRAG\working_repository"
 CONTENT_DIR = r"C:\Users\mkatsili\projects\PathRAG\content_repository"
-timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-EXCEL_OUTPUT = rf"C:\Users\mkatsili\projects\PathRAG\query_results_{timestamp}.xlsx"
+run_timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+# Using a fixed Excel file name without timestamp
+EXCEL_OUTPUT = r"C:\Users\mkatsili\projects\PathRAG\query_results.xlsx"
 
-print(f"Script started at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+print(f"Script started at: {run_timestamp}")
 
 # Create working directory if it doesn't exist
 if not os.path.exists(WORKING_DIR):
@@ -102,6 +103,12 @@ try:
     "Με ποιους τρόπους μπορεί να κάνει αμφισβήτηση συναλλαγής κάρτας ένας πελάτης;"
     ]
     
+    # Define a system prompt to guide the LLM responses
+    system_prompt = """You are a helpful banking assistant for a Greek bank. 
+    Answer questions in Greek based on the banking documentation provided. 
+    Be concise, accurate, and provide specific policy information when available.
+    If you're not sure about something, acknowledge the limitation and suggest where the user might find more information."""
+    
     # Create a list to hold our results for the Excel file
     results_for_excel = []
     
@@ -109,10 +116,11 @@ try:
     print("-" * 50)
     
     for i, question in enumerate(questions):
+        query_id = f"Q{i+1}"
         try:
             print(f"\nQuery {i+1}/{len(questions)}: '{question}'")
             start_time = time.time()
-            result = rag.query(question, param=QueryParam(mode="hybrid", use_cache=False))
+            result = rag.query(question, param=QueryParam(mode="hybrid", use_cache=False), system_prompt=system_prompt)
             end_time = time.time()
             query_time = end_time - start_time
             
@@ -120,8 +128,10 @@ try:
             print(f"Response length: {len(str(result))} characters")
             print("Response preview: " + str(result)[:100] + "..." if len(str(result)) > 100 else str(result))
             
-            # Add result to our list for Excel export
+            # Add result to our list for Excel export with run timestamp and query ID
             results_for_excel.append({
+                "run_on": run_timestamp,
+                "query_id": query_id,
                 "Question": question,
                 "Response": result,
                 "Time (seconds)": round(query_time, 2)
@@ -130,17 +140,36 @@ try:
             print(f"ERROR with query '{question}': {str(e)}")
             traceback.print_exc()
             results_for_excel.append({
+                "run_on": run_timestamp,
+                "query_id": query_id,
                 "Question": question,
                 "Response": f"ERROR: {str(e)}",
                 "Time (seconds)": 0
             })
     
-    # Create a DataFrame and write to Excel
+    # Create a DataFrame from current results
     if results_for_excel:
         try:
             print(f"\nSaving results to Excel file: {EXCEL_OUTPUT}")
-            df = pd.DataFrame(results_for_excel)
-            df.to_excel(EXCEL_OUTPUT, index=False)
+            df_new = pd.DataFrame(results_for_excel)
+            
+            # Check if excel file already exists
+            if os.path.exists(EXCEL_OUTPUT):
+                # Read existing file and append new results
+                try:
+                    df_existing = pd.read_excel(EXCEL_OUTPUT)
+                    df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+                    print(f"Appended new results to existing file with {len(df_existing)} previous entries")
+                except Exception as e:
+                    print(f"Error reading existing file: {str(e)}. Creating new file instead.")
+                    df_combined = df_new
+            else:
+                # Create new file
+                df_combined = df_new
+                print("Creating new Excel file")
+            
+            # Write combined results to Excel
+            df_combined.to_excel(EXCEL_OUTPUT, index=False)
             print(f"Results saved successfully to {EXCEL_OUTPUT}")
         except Exception as e:
             print(f"ERROR saving Excel file: {str(e)}")
