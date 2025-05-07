@@ -120,7 +120,8 @@ try:
         try:
             print(f"\nQuery {i+1}/{len(questions)}: '{question}'")
             start_time = time.time()
-            result = rag.query(question, param=QueryParam(mode="hybrid", use_cache=False), system_prompt=system_prompt)
+            # Remove the system_prompt parameter as it's not supported
+            result = rag.query(question, param=QueryParam(mode="hybrid", use_cache=False, system_prompt=system_prompt))
             end_time = time.time()
             query_time = end_time - start_time
             
