@@ -27,6 +27,7 @@ logger.setLevel("INFO")
 # Define paths
 WORKING_DIR = r"C:\Users\mkatsili\projects\PathRAG\working_repository"
 CONTENT_DIR = r"C:\Users\mkatsili\projects\PathRAG\content_repository"
+QA_CSV_PATH = r"C:\Users\mkatsili\projects\PathRAG\athena_qa.csv"
 run_timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 # Using a fixed Excel file name without timestamp
 EXCEL_OUTPUT = r"C:\Users\mkatsili\projects\PathRAG\query_results.xlsx"
@@ -97,11 +98,15 @@ try:
         print("Using existing knowledge base in working directory:", WORKING_DIR)
         print("Make sure the knowledge base files already exist in this directory.")
 
-    # Test retrieval with timing
-    questions = [
-    "υπάρχει ηλικιακό όριο στην απόκτηση πιστωτικής κάρτας μεγιστο η ελαχιστο;",
-    "Με ποιους τρόπους μπορεί να κάνει αμφισβήτηση συναλλαγής κάρτας ένας πελάτης;"
-    ]
+    # Read questions from athena_qa.csv
+    print(f"\nReading questions from {QA_CSV_PATH}...")
+    try:
+        qa_df = pd.read_csv(QA_CSV_PATH, encoding='utf-8')
+        print(f"Successfully loaded {len(qa_df)} questions from CSV file")
+    except Exception as e:
+        print(f"ERROR loading questions from CSV: {str(e)}")
+        traceback.print_exc()
+        sys.exit(1)
     
     # Define a system prompt to guide the LLM responses
     system_prompt = """You are the internal virtual assistant for the National Bank of Greece.
@@ -155,20 +160,31 @@ Your role is to support bank-related queries by delivering accurate, concise, an
 - Indicate when in-branch visits or verification are required.
 """
 
-
-    
     # Create a list to hold our results for the Excel file
     results_for_excel = []
     
-    print("\nRunning queries:")
+    print("\nRunning queries from CSV file:")
     print("-" * 50)
     
-    for i, question in enumerate(questions):
-        query_id = f"Q{i+1}"
+    # Define total number of questions to process
+    total_questions = len(qa_df)
+    
+    # Process each question from the CSV file
+    for index, row in qa_df.iterrows():
+        question_id = row.get('#', f'Q{index+1}')
+        question = row.get('Question', '')
+        area = row.get('Περιοχή', 'Unknown')
+        reference_answer = row.get('Answer', '')
+        sources = row.get('Sources', '')
+        
+        if not question:
+            print(f"Skipping row {index+1}: No question found")
+            continue
+        
         try:
-            print(f"\nQuery {i+1}/{len(questions)}: '{question}'")
+            print(f"\nQuery {index+1}/{total_questions}: '{question}' (Area: {area})")
             start_time = time.time()
-            # Remove the system_prompt parameter as it's not supported
+# Remove the system_prompt parameter as it's not supported
             result = rag.query(question, param=QueryParam(mode="hybrid", use_cache=False, system_prompt=system_prompt))
             end_time = time.time()
             query_time = end_time - start_time
@@ -179,46 +195,37 @@ Your role is to support bank-related queries by delivering accurate, concise, an
             
             # Add result to our list for Excel export with run timestamp and query ID
             results_for_excel.append({
-                "run_on": run_timestamp,
-                "query_id": query_id,
+                "Run Date": run_timestamp,
+                "ID": question_id,
+                "Area": area,
                 "Question": question,
-                "Response": result,
+                "PathRAG Response": result,
+                "Reference Answer": reference_answer,
+                "Sources": sources,
                 "Time (seconds)": round(query_time, 2)
             })
         except Exception as e:
             print(f"ERROR with query '{question}': {str(e)}")
             traceback.print_exc()
             results_for_excel.append({
-                "run_on": run_timestamp,
-                "query_id": query_id,
+                "Run Date": run_timestamp,
+                "ID": question_id,
+                "Area": area,
                 "Question": question,
-                "Response": f"ERROR: {str(e)}",
+                "PathRAG Response": f"ERROR: {str(e)}",
+                "Reference Answer": reference_answer,
+                "Sources": sources,
                 "Time (seconds)": 0
             })
     
-    # Create a DataFrame from current results
+    # Create a DataFrame from results
     if results_for_excel:
         try:
             print(f"\nSaving results to Excel file: {EXCEL_OUTPUT}")
             df_new = pd.DataFrame(results_for_excel)
             
-            # Check if excel file already exists
-            if os.path.exists(EXCEL_OUTPUT):
-                # Read existing file and append new results
-                try:
-                    df_existing = pd.read_excel(EXCEL_OUTPUT)
-                    df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-                    print(f"Appended new results to existing file with {len(df_existing)} previous entries")
-                except Exception as e:
-                    print(f"Error reading existing file: {str(e)}. Creating new file instead.")
-                    df_combined = df_new
-            else:
-                # Create new file
-                df_combined = df_new
-                print("Creating new Excel file")
-            
-            # Write combined results to Excel
-            df_combined.to_excel(EXCEL_OUTPUT, index=False)
+            # Write results to Excel
+            df_new.to_excel(EXCEL_OUTPUT, index=False)
             print(f"Results saved successfully to {EXCEL_OUTPUT}")
         except Exception as e:
             print(f"ERROR saving Excel file: {str(e)}")

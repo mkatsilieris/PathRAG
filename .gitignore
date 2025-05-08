@@ -28,4 +28,6 @@ PathRAG.log
 content_repository/**
 working_repository/**
 
+# Temporary files
 *.xlsx
+*.csv

@@ -724,14 +724,8 @@ async def _get_node_data(
         node_datas, query_param, knowledge_graph_inst
     )
 
-    # Log detailed information about nodes and relationships
-    node_names = [node["entity_name"] for node in node_datas]
-    logger.info(
-        f"Local query uses {len(node_datas)} entites, {len(use_relations)} relations, {len(use_text_units)} text units"
-    )
-    logger.info(f"Entities used: {node_names}")
-    if use_relations:
-        logger.info(f"Relationships: {use_relations}")
+    logger.info(f"Local query uses {len(node_datas)} entites, {len(use_relations)} relations, {len(use_text_units)} text units")
+
 
     entites_section_list = [["id", "entity", "type", "description", "rank"]]
     for i, n in enumerate(node_datas):
