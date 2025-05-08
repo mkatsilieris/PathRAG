@@ -8,7 +8,7 @@ from PathRAG.llm import azure_openai_complete, azure_openai_embedding
 load_dotenv()
 
 # Set up paths
-WORKING_DIR = "./azure_search_test_final"
+WORKING_DIR = "./test/azure_search_test_final"
 
 # Test document
 TEST_DOCUMENT = """

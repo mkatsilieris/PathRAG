@@ -13,7 +13,7 @@ load_dotenv()
 logger.setLevel("INFO")
 
 # Define paths
-WORKING_DIR = "./azure_search_test"
+WORKING_DIR = "./test/azure_search_test"
 
 print(f"Script started at: {time.strftime('%Y-%m-%d %H:%M:%S')}")
 
